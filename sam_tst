@@ -1,0 +1,84 @@
+import os
+import cv2
+import torch
+import numpy as np
+from skimage.metrics import structural_similarity as ssim
+from segment_anything import sam_model_registry, SamPredictor
+
+MODEL_PATH = "src/models/sam.pth"  
+MODEL_TYPE = "vit_l"  
+
+INPUT_DIR = "amostra"  
+RESULT_DIR = "/resultados/"  
+
+def load_sam_model():
+    print("Carregando o modelo SAM...")
+    sam = sam_model_registry[MODEL_TYPE](checkpoint=MODEL_PATH)
+    sam.to(device="cuda" if torch.cuda.is_available() else "cpu")
+    return SamPredictor(sam)
+
+def segment_image(image_path, predictor):
+    image = cv2.imread(image_path)
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    predictor.set_image(image_rgb)
+
+    height, width, _ = image_rgb.shape
+    input_point = np.array([[width // 2, height // 2]])  # Ponto no centro da imagem
+    input_label = np.array([1])  # Indica o ponto de interesse (1 = foreground)
+
+    masks, _, _ = predictor.predict(point_coords=input_point, point_labels=input_label, multimask_output=True)
+
+    return image_rgb, masks
+
+def calculate_ssim(mask1, mask2):
+    return ssim(mask1, mask2)
+
+def save_result(mask_2, mask_0, filename, result_dir):
+    os.makedirs(result_dir, exist_ok=True)
+
+    # Verificar inversão de máscaras
+    if np.sum(mask_2 == 255) > np.sum(mask_2 == 0):
+        print("Invertendo máscara [2].")
+        mask_2 = cv2.bitwise_not(mask_2)
+
+    if np.sum(mask_0 == 255) > np.sum(mask_0 == 0):
+        print("Invertendo máscara [0].")
+        mask_0 = cv2.bitwise_not(mask_0)
+
+    similarity = calculate_ssim(mask_2, mask_0)
+    print(f"Similaridade SSIM entre [2] e [0]: {similarity:.2f}")
+
+    if similarity > 0.98:
+        print("Máscaras [2] e [0] são similares. Salvando apenas máscara [2].")
+        result = mask_2
+    else:
+        print("Máscaras [2] e [0] são diferentes. Salvando diferença.")
+        result = cv2.absdiff(mask_2, mask_0)
+
+    result_filename = os.path.join(result_dir, f"result_{filename}")
+    cv2.imwrite(result_filename, result)
+    print(f"Resultado salvo em: {result_filename}")
+
+
+def process_folder(input_dir, result_dir):
+    predictor = load_sam_model()
+
+    for filename in os.listdir(input_dir):
+        if filename.lower().endswith((".jpg", ".jpeg", ".png")):
+            image_path = os.path.join(input_dir, filename)
+            print(f"Processando {filename}...")
+
+            _, masks = segment_image(image_path, predictor)
+
+            if len(masks) < 3:
+                print(f"Menos de 3 máscaras disponíveis para {filename}. Pulando.")
+                continue
+
+            mask_2 = (masks[2] * 255).astype(np.uint8)
+            mask_0 = (masks[0] * 255).astype(np.uint8)
+
+            save_result(mask_2, mask_0, filename, result_dir)
+
+if __name__ == "__main__":
+    process_folder(INPUT_DIR, RESULT_DIR)
