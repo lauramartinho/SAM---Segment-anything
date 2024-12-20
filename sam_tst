@@ -8,8 +8,9 @@ from segment_anything import sam_model_registry, SamPredictor
 MODEL_PATH = "src/models/sam.pth"  
 MODEL_TYPE = "vit_l"  
 
-INPUT_DIR = "amostra"  
-RESULT_DIR = "/resultados/"  
+INPUT_DIR = "/home/ti/Documents/ia-vision/machines_amostra"  
+OUTPUT_DIR = "/home/ti/Pictures/machines_processed"  
+RESULT_DIR = "/home/ti/Pictures/machines_result"  
 
 def load_sam_model():
     print("Carregando o modelo SAM...")
@@ -24,44 +25,78 @@ def segment_image(image_path, predictor):
     predictor.set_image(image_rgb)
 
     height, width, _ = image_rgb.shape
-    input_point = np.array([[width // 2, height // 2]])  # Ponto no centro da imagem
-    input_label = np.array([1])  # Indica o ponto de interesse (1 = foreground)
+    input_point = np.array([[width // 2, height // 2]])  # ponto no centro da imagem
+    input_label = np.array([1])  # ponto de interesse (1 = foreground)
 
     masks, _, _ = predictor.predict(point_coords=input_point, point_labels=input_label, multimask_output=True)
 
-    return image_rgb, masks
+    return image, masks
 
 def calculate_ssim(mask1, mask2):
     return ssim(mask1, mask2)
 
-def save_result(mask_2, mask_0, filename, result_dir):
+def process_mask(mask):
+   
+    mask_binary = (mask * 255).astype(np.uint8)
+
+    # áreas binarizadas 
+    white_area = np.sum(mask_binary == 255)
+    black_area = np.sum(mask_binary == 0)
+
+    print(f"Área branca: {white_area}, Área preta: {black_area}")
+
+    if white_area > black_area:
+        print("Invertendo máscara devido à área branca maior.")
+        mask_binary = cv2.bitwise_not(mask_binary)
+
+    return mask_binary
+
+def save_conventional(image, masks, filename, output_path):
+    os.makedirs(output_path, exist_ok=True)
+
+    for i, mask in enumerate(masks):
+        mask_binary = process_mask(mask)  # Processar cada máscara
+        mask_filename = os.path.join(output_path, f"mask_{i}.png")
+        cv2.imwrite(mask_filename, mask_binary)
+
+        overlay = image.copy()
+        overlay[mask_binary == 255] = [0, 255, 0]  
+        overlay_filename = os.path.join(output_path, f"overlay_{i}.png")
+        cv2.imwrite(overlay_filename, overlay)
+
+def save_result(mask_2, mask_0, filename, output_dir, result_dir):
+    os.makedirs(output_dir, exist_ok=True)
     os.makedirs(result_dir, exist_ok=True)
 
-    # Verificar inversão de máscaras
-    if np.sum(mask_2 == 255) > np.sum(mask_2 == 0):
-        print("Invertendo máscara [2].")
-        mask_2 = cv2.bitwise_not(mask_2)
+    mask_2 = process_mask(mask_2)
+    mask_0 = process_mask(mask_0)
 
-    if np.sum(mask_0 == 255) > np.sum(mask_0 == 0):
-        print("Invertendo máscara [0].")
-        mask_0 = cv2.bitwise_not(mask_0)
+    # verificar áreas branca/preta de máscara `[0]`
+    white_area_0 = np.sum(mask_0 == 255)
+    black_area_0 = np.sum(mask_0 == 0)
 
+    # imilaridade entre `[0]` e `[2]`
     similarity = calculate_ssim(mask_2, mask_0)
     print(f"Similaridade SSIM entre [2] e [0]: {similarity:.2f}")
 
     if similarity > 0.98:
         print("Máscaras [2] e [0] são similares. Salvando apenas máscara [2].")
         result = mask_2
+    elif white_area_0 > black_area_0:
+        print("Área branca da máscara [0] é maior que a preta. Salvando apenas máscara [2].")
+        result = mask_2
     else:
-        print("Máscaras [2] e [0] são diferentes. Salvando diferença.")
-        result = cv2.absdiff(mask_2, mask_0)
+        print("Máscaras [2] e [0] são diferentes. Salvando subtração [2] - [0].")
+        result = cv2.subtract(mask_2, mask_0)
 
-    result_filename = os.path.join(result_dir, f"result_{filename}")
+    result_filename = os.path.join(output_dir, f"result_{filename}")
     cv2.imwrite(result_filename, result)
-    print(f"Resultado salvo em: {result_filename}")
+
+    result_final_filename = os.path.join(result_dir, f"result_{filename}")
+    cv2.imwrite(result_final_filename, result)
 
 
-def process_folder(input_dir, result_dir):
+def process_folder(input_dir, output_dir, result_dir):
     predictor = load_sam_model()
 
     for filename in os.listdir(input_dir):
@@ -69,16 +104,18 @@ def process_folder(input_dir, result_dir):
             image_path = os.path.join(input_dir, filename)
             print(f"Processando {filename}...")
 
-            _, masks = segment_image(image_path, predictor)
+            image, masks = segment_image(image_path, predictor)
 
             if len(masks) < 3:
                 print(f"Menos de 3 máscaras disponíveis para {filename}. Pulando.")
                 continue
 
-            mask_2 = (masks[2] * 255).astype(np.uint8)
-            mask_0 = (masks[0] * 255).astype(np.uint8)
+            mask_2 = masks[2]
+            mask_0 = masks[0]
 
-            save_result(mask_2, mask_0, filename, result_dir)
+            save_conventional(image, masks, filename, os.path.join(output_dir, filename.split(".")[0]))
+
+            save_result(mask_2, mask_0, filename, os.path.join(output_dir, filename.split(".")[0]), result_dir)
 
 if __name__ == "__main__":
-    process_folder(INPUT_DIR, RESULT_DIR)
+    process_folder(INPUT_DIR, OUTPUT_DIR, RESULT_DIR)
